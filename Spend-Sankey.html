@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spend Sankey</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      background: #0f172a;
+      color: #f1f5f9;
+      margin: 0;
+      padding: 2rem;
+    }
+    h1 { font-size: 1.75rem; font-weight: 700; color: #f8fafc; margin: 0; }
+    .subtitle { color: #94a3b8; margin-top: 0.25rem; font-size: 0.9rem; }
+    .dropzone {
+      border: 2px dashed #334155;
+      border-radius: 12px;
+      padding: 3rem;
+      text-align: center;
+      cursor: pointer;
+      margin-bottom: 1.5rem;
+    }
+    .dropzone:hover { border-color: #475569; }
+    .dropzone .icon { font-size: 3rem; margin-bottom: 0.75rem; }
+    .dropzone p { color: #94a3b8; margin-bottom: 1rem; }
+    .btn {
+      background: #4f46e5;
+      color: white;
+      padding: 0.6rem 1.5rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: none;
+      font-family: inherit;
+    }
+    .btn:hover { background: #4338ca; }
+    .hint { color: #475569; font-size: 0.8rem; margin-top: 1rem; }
+    .hint code { color: #7dd3fc; }
+    .error {
+      background: #450a0a;
+      border: 1px solid #dc2626;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      color: #fca5a5;
+    }
+    .stats {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .stat {
+      background: #1e293b;
+      border-radius: 10px;
+      padding: 0.75rem 1.25rem;
+      flex: 1;
+      min-width: 140px;
+    }
+    .stat-label { color: #94a3b8; font-size: 0.75rem; margin-bottom: 0.2rem; }
+    .stat-value { font-weight: 700; font-size: 1rem; color: #f1f5f9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .bar span { color: #94a3b8; font-size: 0.9rem; }
+    .btn-secondary {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #94a3b8;
+      padding: 0.3rem 0.9rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-family: inherit;
+    }
+    .btn-secondary:hover { background: #334155; color: #f1f5f9; }
+    .chart-wrap { background: #1e293b; border-radius: 12px; padding: 1rem; }
+    #sankey { width: 100%; }
+    .hidden { display: none; }
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>💸 Spend Sankey</h1>
+    <p class="subtitle">Upload your Excel file to visualize spend by department and person</p>
+  </div>
+
+  <div id="uploadArea" class="dropzone">
+    <div class="icon">📊</div>
+    <p>Drag & drop your Excel file here, or click to browse</p>
+    <label class="btn">Choose File<input type="file" id="fileInput" accept=".xlsx,.xls" /></label>
+    <p class="hint">Required: <code>Department</code>, <code>Person</code>, <code>February Annualized</code>. Optional: <code>Organization</code>, <code>February Spend to Date</code> (to toggle view).</p>
+  </div>
+
+  <div id="errorBox" class="error hidden"></div>
+  <p id="loading" class="hidden" style="color: #94a3b8;">Loading...</p>
+
+  <div id="statsBar" class="hidden stats"></div>
+  <div id="valueToggle" class="hidden bar" style="margin-bottom:0.5rem;align-items:center;gap:0.25rem;"></div>
+  <div id="navBar" class="hidden bar"></div>
+  <div id="deptButtons" class="hidden bar" style="margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;"></div>
+
+  <div id="chartSection" class="hidden">
+    <div class="chart-wrap">
+      <div id="sankey"></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const fileInput = document.getElementById('fileInput');
+      const uploadArea = document.getElementById('uploadArea');
+      const errorBox = document.getElementById('errorBox');
+      const loading = document.getElementById('loading');
+      const statsBar = document.getElementById('statsBar');
+      const navBar = document.getElementById('navBar');
+      const valueToggle = document.getElementById('valueToggle');
+      const deptButtons = document.getElementById('deptButtons');
+      const chartSection = document.getElementById('chartSection');
+
+      let rows = [];
+      let selectedOrg = null;
+      let selectedDept = null;
+      let valueMode = 'annualized';  // 'annualized' | 'todate'
+      let fileName = '';
+
+      function parseExcel(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = function (e) {
+            try {
+              const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+              const ws = wb.Sheets[wb.SheetNames[0]];
+              // Header and data start at Excel row 5 (0-based index 4)
+              var data = XLSX.utils.sheet_to_json(ws, { range: 4 });
+              resolve(data);
+            } catch (err) { reject(err); }
+          };
+          reader.onerror = reject;
+          reader.readAsArrayBuffer(file);
+        });
+      }
+
+      // Match columns flexibly: ignore case and extra spaces; accept "Amount" for "Annualized"
+      function normalizeRows(data) {
+        if (!data || !data.length) return { rows: [], error: 'Spreadsheet is empty.' };
+        const rawKeys = Object.keys(data[0]);
+        const keyMap = {};
+        rawKeys.forEach(function (k) {
+          const n = String(k).trim().toLowerCase();
+          keyMap[n] = k;
+        });
+        var orgKey = keyMap['organization'] || keyMap['organisation'] || keyMap['org'];
+        var deptKey = keyMap['department'];
+        var personKey = keyMap['person'];
+        var annualizedKey = keyMap['february annualized'] || keyMap['annualized'] || keyMap['amount'];
+        var toDateKey = keyMap['february spend to date'] || keyMap['spend to date'] || keyMap['total'] || keyMap['ytd'] || keyMap['actual'];
+        if (!deptKey || !personKey || !annualizedKey) {
+          return {
+            rows: null,
+            error: 'Need columns: Department, Person, and February Annualized (or Annualized/Amount). Optional: February Spend to Date (or Total), Organization. Your columns: ' + rawKeys.join(', ')
+          };
+        }
+        var totalLabels = /^(total|grand total|subtotal|sum)$/i;
+        var rows = data
+          .map(function (r) {
+            var org = orgKey && r[orgKey] != null ? String(r[orgKey]).trim() : '';
+            if (!org) org = 'All';
+            var ann = Number(r[annualizedKey]) || 0;
+            var toDate = toDateKey != null && r[toDateKey] != null ? Number(r[toDateKey]) || 0 : ann;
+            return {
+              Organization: org,
+              Department: r[deptKey] != null ? String(r[deptKey]).trim() : '',
+              Person: r[personKey] != null ? String(r[personKey]).trim() : '',
+              Annualized: ann,
+              SpendToDate: toDate
+            };
+          })
+          .filter(function (r) {
+            if (!r.Department || !r.Person) return false;
+            if (r.Annualized <= 0 && r.SpendToDate <= 0) return false;
+            if (totalLabels.test(r.Organization) || totalLabels.test(r.Department) || totalLabels.test(r.Person)) return false;
+            return true;
+          });
+        return { rows: rows, error: null };
+      }
+
+      var DEPT_PALETTE = ['#06b6d4', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#e11d48', '#4f46e5'];
+      function shadeColor(hex, mixPercent) {
+        mixPercent = mixPercent == null ? 0.5 : mixPercent;
+        var n = parseInt(hex.slice(1), 16);
+        var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+        var m = 1 - mixPercent;
+        return 'rgb(' + Math.round(r * m + 255 * mixPercent) + ',' + Math.round(g * m + 255 * mixPercent) + ',' + Math.round(b * m + 255 * mixPercent) + ')';
+      }
+      function hexToRgba(hex, a) {
+        var n = parseInt(hex.slice(1), 16);
+        var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + (a == null ? 0.4 : a) + ')';
+      }
+      function shortVal(v) { return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : (v / 1e3).toFixed(0) + 'k'; }
+      var ORG_PALETTE = ['#06b6d4', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#e11d48', '#4f46e5'];
+      function getValue(r) { return valueMode === 'todate' ? (r.SpendToDate != null ? Number(r.SpendToDate) : Number(r.Annualized)) : Number(r.Annualized); }
+
+      // Level 1: Total (left) → Organizations (right)
+      function buildFullSankey(rows) {
+        var orgs = [...new Set(rows.map(r => r.Organization))];
+        var totalSpend = rows.reduce(function (s, r) { return s + getValue(r); }, 0);
+        var nodeLabels = ['Total Spend ' + shortVal(totalSpend)].concat(orgs.map(function (o) {
+          var t = rows.filter(function (r) { return r.Organization === o; }).reduce(function (s, r) { return s + getValue(r); }, 0);
+          return o + ' ' + shortVal(t);
+        }));
+        var orgColors = orgs.map(function (_, i) { return ORG_PALETTE[i % ORG_PALETTE.length]; });
+        var nodeColors = ['#4f46e5'].concat(orgColors);
+        var nodeX = [0].concat(orgs.map(function () { return 1; }));
+        var links = { source: [], target: [], value: [], color: [] };
+        orgs.forEach(function (org, i) {
+          var total = rows.filter(function (r) { return r.Organization === org; }).reduce(function (s, r) { return s + getValue(r); }, 0);
+          links.source.push(0);
+          links.target.push(1 + i);
+          links.value.push(total);
+          links.color.push(hexToRgba(orgColors[i]));
+        });
+        return { nodeLabels, nodeColors, nodeX, links };
+      }
+
+      // Level 2: Organization (left) → Departments (right), within selected org
+      function buildOrgSankey(rows, org) {
+        var orgRows = rows.filter(function (r) { return r.Organization === org; });
+        var depts = [...new Set(orgRows.map(r => r.Department))];
+        var orgTotal = orgRows.reduce(function (s, r) { return s + getValue(r); }, 0);
+        var orgIdx = [...new Set(rows.map(r => r.Organization))].indexOf(org);
+        var orgColor = ORG_PALETTE[orgIdx % ORG_PALETTE.length];
+        var deptColors = depts.map(function (_, i) { return DEPT_PALETTE[i % DEPT_PALETTE.length]; });
+        var nodeLabels = [org + ' ' + shortVal(orgTotal)].concat(depts.map(function (d) {
+          var t = orgRows.filter(function (r) { return r.Department === d; }).reduce(function (s, r) { return s + getValue(r); }, 0);
+          return d + ' ' + shortVal(t);
+        }));
+        var nodeColors = [orgColor].concat(deptColors);
+        var nodeX = [0].concat(depts.map(function () { return 1; }));
+        var links = { source: [], target: [], value: [], color: [] };
+        depts.forEach(function (dept, di) {
+          var total = orgRows.filter(function (r) { return r.Department === dept; }).reduce(function (s, r) { return s + getValue(r); }, 0);
+          links.source.push(0);
+          links.target.push(1 + di);
+          links.value.push(total);
+          links.color.push(hexToRgba(deptColors[di]));
+        });
+        return { nodeLabels, nodeColors, nodeX, links };
+      }
+
+      // Level 3: Department (left) → Individuals (right), within selected org + dept
+      function buildDeptSankey(rows, org, dept) {
+        var deptRows = rows.filter(function (r) { return r.Organization === org && r.Department === dept; });
+        var people = [...new Set(deptRows.map(r => r.Person))];
+        var deptTotal = deptRows.reduce(function (s, r) { return s + getValue(r); }, 0);
+        var allDepts = [...new Set(rows.map(r => r.Department))];
+        var deptIdx = allDepts.indexOf(dept);
+        var deptColor = DEPT_PALETTE[deptIdx % DEPT_PALETTE.length];
+        var peopleColors = people.map(function () { return shadeColor(deptColor, 0.55); });
+        var peopleLabels = people.map(function (p) {
+          var t = deptRows.filter(function (r) { return r.Person === p; }).reduce(function (s, r) { return s + getValue(r); }, 0);
+          return p + ' ' + shortVal(t);
+        });
+        var nodeLabels = [dept + ' ' + shortVal(deptTotal)].concat(peopleLabels);
+        var nodeColors = [deptColor].concat(peopleColors);
+        var nodeX = [0].concat(people.map(function () { return 1; }));
+        var links = { source: [], target: [], value: [], color: [] };
+        deptRows.forEach(function (r) {
+          links.source.push(0);
+          links.target.push(1 + people.indexOf(r.Person));
+          links.value.push(getValue(r));
+          links.color.push(hexToRgba(deptColor, 0.5));
+        });
+        return { nodeLabels, nodeColors, nodeX, links };
+      }
+
+      function fmt(n) {
+        return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
+      }
+
+      function renderChart() {
+        var chartData;
+        if (selectedDept && selectedOrg) chartData = buildDeptSankey(rows, selectedOrg, selectedDept);
+        else if (selectedOrg) chartData = buildOrgSankey(rows, selectedOrg);
+        else chartData = buildFullSankey(rows);
+        var nodeOpt = {
+          pad: 12,
+          thickness: 18,
+          line: { color: '#0f172a', width: 1 },
+          label: chartData.nodeLabels,
+          color: chartData.nodeColors,
+          hovertemplate: '<b>%{label}</b><br>Total: %{value:$,.0f}<extra></extra>'
+        };
+        if (chartData.nodeX) nodeOpt.x = chartData.nodeX;
+        var trace = {
+          type: 'sankey',
+          orientation: 'h',
+          arrangement: 'snap',
+          node: nodeOpt,
+          link: {
+            source: chartData.links.source,
+            target: chartData.links.target,
+            value: chartData.links.value,
+            color: chartData.links.color,
+            hovertemplate: '%{source.label} → %{target.label}<br>%{value:$,.0f}<extra></extra>'
+          }
+        };
+        const layout = {
+          paper_bgcolor: '#1e293b',
+          plot_bgcolor: '#1e293b',
+          font: { color: '#f1f5f9', family: 'Inter, sans-serif', size: 13 },
+          margin: { l: 8, r: 8, t: 12, b: 8 },
+          height: 420
+        };
+        Plotly.newPlot('sankey', [trace], layout, { displayModeBar: false, responsive: true });
+
+        document.getElementById('sankey').removeEventListener('plotly_click', onSankeyClick);
+        document.getElementById('sankey').addEventListener('plotly_click', onSankeyClick);
+      }
+
+      function onSankeyClick(data) {
+        if (!data || !data.points || !data.points.length) return;
+        var pt = data.points[0];
+        if (pt.type !== 'sankey') return;
+        var label = (pt.label != null ? pt.label : (pt.target && pt.target.label != null ? pt.target.label : (pt.source && pt.source.label != null ? pt.source.label : ''))) || '';
+        if (label.indexOf('Total Spend') === 0) return;
+
+        if (!selectedOrg) {
+          var orgs = [...new Set(rows.map(r => r.Organization))];
+          orgs.sort(function (a, b) { return b.length - a.length; });
+          var matchedOrg = null;
+          for (var i = 0; i < orgs.length; i++) {
+            var o = orgs[i];
+            if (label === o || label.indexOf(o + ' ') === 0) { matchedOrg = o; break; }
+          }
+          if (!matchedOrg && typeof pt.pointNumber === 'number') {
+            if (pt.pointNumber >= 1 && pt.pointNumber <= orgs.length) matchedOrg = orgs[pt.pointNumber - 1];
+            else if (pt.pointNumber >= 0 && pt.pointNumber < orgs.length) matchedOrg = orgs[pt.pointNumber];
+          }
+          if (matchedOrg) { selectedOrg = matchedOrg; renderNav(); renderChart(); }
+          return;
+        }
+        if (selectedOrg && !selectedDept) {
+          var orgRows = rows.filter(function (r) { return r.Organization === selectedOrg; });
+          var depts = [...new Set(orgRows.map(r => r.Department))];
+          depts.sort(function (a, b) { return b.length - a.length; });
+          var matchedDept = null;
+          for (var j = 0; j < depts.length; j++) {
+            var d = depts[j];
+            if (label === d || label.indexOf(d + ' ') === 0) { matchedDept = d; break; }
+          }
+          if (!matchedDept && typeof pt.pointNumber === 'number') {
+            if (pt.pointNumber >= 1 && pt.pointNumber <= depts.length) matchedDept = depts[pt.pointNumber - 1];
+            else if (pt.pointNumber >= 0 && pt.pointNumber < depts.length) matchedDept = depts[pt.pointNumber];
+          }
+          if (matchedDept) { selectedDept = matchedDept; renderNav(); renderChart(); }
+        }
+      }
+
+      function renderStats() {
+        const totalSpend = rows.reduce(function (sum, r) { return sum + getValue(r); }, 0);
+        const orgCount = new Set(rows.map(r => r.Organization)).size;
+        const deptCount = new Set(rows.map(r => r.Department)).size;
+        const peopleCount = new Set(rows.map(r => r.Person)).size;
+        statsBar.innerHTML = [
+          { label: 'Total Spend', value: fmt(totalSpend), color: '#4f46e5' },
+          { label: 'Organizations', value: orgCount, color: '#06b6d4' },
+          { label: 'Departments', value: deptCount, color: '#10b981' },
+          { label: 'People', value: peopleCount, color: '#f59e0b' },
+          { label: 'File', value: fileName, color: '#94a3b8' }
+        ].map(s => `
+          <div class="stat" style="border-left: 4px solid ${s.color}">
+            <div class="stat-label">${s.label}</div>
+            <div class="stat-value">${s.value}</div>
+          </div>
+        `).join('');
+        statsBar.classList.remove('hidden');
+      }
+
+      function renderNav() {
+        var changeFileLabel = '<label class="btn-secondary">Change File<input type="file" accept=".xlsx,.xls" id="changeFile" /></label>' +
+          ' <button type="button" class="btn-secondary" id="shareBtn">Save for sharing</button>';
+        if (selectedDept && selectedOrg) {
+          navBar.innerHTML = '<span style="color:#94a3b8">Total <span style="color:#475569">›</span> <span style="color:#06b6d4">' + selectedOrg + '</span> <span style="color:#475569">›</span> <span style="color:#10b981">' + selectedDept + '</span> (Department → Names)</span>' +
+            ' <button type="button" class="btn-secondary" id="backBtn">← Back to Departments</button> ' + changeFileLabel;
+        } else if (selectedOrg) {
+          navBar.innerHTML = '<span style="color:#94a3b8">Total <span style="color:#475569">›</span> <span style="color:#06b6d4">' + selectedOrg + '</span> (Organization → Departments)</span>' +
+            ' <button type="button" class="btn-secondary" id="backBtn">← Back to Total</button> ' + changeFileLabel;
+        } else {
+          navBar.innerHTML = '<span style="color:#4f46e5">Total → Organizations</span>' +
+            ' <span style="color:#475569;font-size:0.8rem">Click an organization below or on the chart to see departments</span> ' + changeFileLabel;
+        }
+        navBar.classList.remove('hidden');
+
+        if (valueToggle && rows.length) {
+          var activeStyle = ' style="background:#334155;color:#f1f5f9"';
+          valueToggle.innerHTML = '<span style="color:#94a3b8;font-size:0.85rem;">View:</span>' +
+            ' <button type="button" class="btn-secondary" id="valTodate"' + (valueMode === 'todate' ? activeStyle : '') + '>February Spend to Date</button>' +
+            ' <button type="button" class="btn-secondary" id="valAnnualized"' + (valueMode === 'annualized' ? activeStyle : '') + '>February Annualized</button>';
+          valueToggle.classList.remove('hidden');
+          var vTodate = document.getElementById('valTodate');
+          var vAnnualized = document.getElementById('valAnnualized');
+          if (vTodate) vTodate.onclick = function () { valueMode = 'todate'; renderStats(); renderNav(); renderChart(); };
+          if (vAnnualized) vAnnualized.onclick = function () { valueMode = 'annualized'; renderStats(); renderNav(); renderChart(); };
+        } else if (valueToggle) {
+          valueToggle.classList.add('hidden');
+          valueToggle.innerHTML = '';
+        }
+
+        if (deptButtons) {
+          if (!rows.length) {
+            deptButtons.classList.add('hidden');
+            deptButtons.innerHTML = '';
+          } else if (selectedDept && selectedOrg) {
+            deptButtons.classList.add('hidden');
+            deptButtons.innerHTML = '';
+          } else if (selectedOrg) {
+            var orgRows = rows.filter(function (r) { return r.Organization === selectedOrg; });
+            var depts = [...new Set(orgRows.map(r => r.Department))];
+            deptButtons.innerHTML = '<span style="color:#94a3b8;font-size:0.85rem;">Click to see names:</span> ' +
+              depts.map(function (d) {
+                var t = orgRows.filter(function (r) { return r.Department === d; }).reduce(function (s, r) { return s + getValue(r); }, 0);
+                return '<button type="button" class="btn-secondary" data-dept="' + d.replace(/"/g, '&quot;') + '">' + d + ' (' + shortVal(t) + ')</button>';
+              }).join(' ');
+            deptButtons.classList.remove('hidden');
+            deptButtons.querySelectorAll('[data-dept]').forEach(function (btn) {
+              btn.onclick = function () {
+                selectedDept = btn.getAttribute('data-dept');
+                renderNav();
+                renderChart();
+              };
+            });
+          } else {
+            var orgs = [...new Set(rows.map(r => r.Organization))];
+            deptButtons.innerHTML = '<span style="color:#94a3b8;font-size:0.85rem;">Click to see departments:</span> ' +
+              orgs.map(function (o) {
+                var t = rows.filter(function (r) { return r.Organization === o; }).reduce(function (s, r) { return s + getValue(r); }, 0);
+                return '<button type="button" class="btn-secondary" data-org="' + o.replace(/"/g, '&quot;') + '">' + o + ' (' + shortVal(t) + ')</button>';
+              }).join(' ');
+            deptButtons.classList.remove('hidden');
+            deptButtons.querySelectorAll('[data-org]').forEach(function (btn) {
+              btn.onclick = function () {
+                selectedOrg = btn.getAttribute('data-org');
+                renderNav();
+                renderChart();
+              };
+            });
+          }
+        }
+
+        var backBtn = document.getElementById('backBtn');
+        if (backBtn) backBtn.onclick = function () {
+          if (selectedDept) { selectedDept = null; }
+          else { selectedOrg = null; }
+          renderNav();
+          renderChart();
+        };
+        var changeFile = document.getElementById('changeFile');
+        if (changeFile) changeFile.onchange = handleFileSelect;
+        var shareBtn = document.getElementById('shareBtn');
+        if (shareBtn) shareBtn.onclick = saveForSharing;
+      }
+
+      function saveForSharing() {
+        if (!rows.length) return;
+        try {
+          var json = JSON.stringify(rows);
+          var b64 = btoa(unescape(encodeURIComponent(json)));
+          var mode = valueMode === 'todate' ? 'todate' : 'annualized';
+          var embedDiv = '<div id="embeddedData" data-rows="' + b64 + '" data-mode="' + mode + '" style="display:none"></div>\n';
+          var htmlInner = document.documentElement.innerHTML;
+          var insertAt = htmlInner.indexOf('<body');
+          if (insertAt === -1) insertAt = htmlInner.indexOf('<div class="header"');
+          var end = htmlInner.indexOf('>', insertAt) + 1;
+          htmlInner = htmlInner.slice(0, end) + embedDiv + htmlInner.slice(end);
+          var fullHtml = '<!DOCTYPE html>\n<html>' + htmlInner + '</html>';
+          var blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
+          var a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'Spend-Sankey-Shared.html';
+          a.click();
+          URL.revokeObjectURL(a.href);
+        } catch (err) {
+          if (typeof alert !== 'undefined') alert('Could not create shared file: ' + (err.message || err));
+        }
+      }
+
+      function handleFileSelect(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        loading.classList.remove('hidden');
+        errorBox.classList.add('hidden');
+        errorBox.textContent = '';
+        selectedOrg = null;
+        selectedDept = null;
+        parseExcel(file).then(function (data) {
+          var result = normalizeRows(data);
+          if (result.error) {
+            errorBox.textContent = '⚠️ ' + result.error;
+            errorBox.classList.remove('hidden');
+            return;
+          }
+          rows = result.rows;
+          fileName = file.name;
+          uploadArea.classList.add('hidden');
+          chartSection.classList.remove('hidden');
+          renderStats();
+          renderNav();
+          renderChart();
+        }).catch(function (err) {
+          errorBox.textContent = '⚠️ ' + (err.message || err);
+          errorBox.classList.remove('hidden');
+        }).finally(function () {
+          loading.classList.add('hidden');
+        });
+        e.target.value = '';
+      }
+
+      uploadArea.addEventListener('click', function (e) { if (e.target !== fileInput) fileInput.click(); });
+      uploadArea.addEventListener('dragover', function (e) { e.preventDefault(); });
+      uploadArea.addEventListener('drop', function (e) {
+        e.preventDefault();
+        const file = e.dataTransfer.files[0];
+        if (file) handleFileSelect({ target: { files: [file] } });
+      });
+      fileInput.addEventListener('change', handleFileSelect);
+
+      var embeddedEl = document.getElementById('embeddedData');
+      if (embeddedEl && embeddedEl.getAttribute('data-rows')) {
+        try {
+          var b64 = embeddedEl.getAttribute('data-rows');
+          rows = JSON.parse(decodeURIComponent(escape(atob(b64))));
+          valueMode = embeddedEl.getAttribute('data-mode') === 'todate' ? 'todate' : 'annualized';
+          fileName = 'Shared view';
+          uploadArea.classList.add('hidden');
+          chartSection.classList.remove('hidden');
+          renderStats();
+          renderNav();
+          renderChart();
+        } catch (e) { }
+      }
+    })();
+  </script>
+</body>
+</html>
