@@ -96,7 +96,7 @@
 <body>
   <div class="header">
     <h1>💸 Spend Sankey</h1>
-    <p class="subtitle">Upload your Excel file to visualize spend by department and person</p>
+    <p class="subtitle">Upload your Excel file to visualize spend by organization, department, and person. Or use a link with <code>?excel=URL</code> to load from a file online.</p>
   </div>
 
   <div id="uploadArea" class="dropzone">
@@ -145,13 +145,23 @@
             try {
               const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
               const ws = wb.Sheets[wb.SheetNames[0]];
-              // Header and data start at Excel row 5 (0-based index 4)
               var data = XLSX.utils.sheet_to_json(ws, { range: 4 });
               resolve(data);
             } catch (err) { reject(err); }
           };
           reader.onerror = reject;
           reader.readAsArrayBuffer(file);
+        });
+      }
+
+      function loadExcelFromUrl(url) {
+        return fetch(url).then(function (r) {
+          if (!r.ok) throw new Error('Could not load file: ' + r.status);
+          return r.arrayBuffer();
+        }).then(function (buf) {
+          var wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+          var ws = wb.Sheets[wb.SheetNames[0]];
+          return XLSX.utils.sheet_to_json(ws, { range: 4 });
         });
       }
 
@@ -553,6 +563,47 @@
           renderNav();
           renderChart();
         } catch (e) { }
+      } else {
+        var excelUrl = '';
+        if (typeof location !== 'undefined') {
+          var params = new URLSearchParams(location.search || '');
+          excelUrl = params.get('excel') || params.get('data') || '';
+          if (!excelUrl && location.hash) {
+            var hash = location.hash.slice(1);
+            var m = /(?:^|&)excel=([^&]+)/.exec(hash);
+            if (m) excelUrl = decodeURIComponent(m[1].replace(/\+/g, ' '));
+          }
+        }
+        if (excelUrl) {
+          if (excelUrl.indexOf('http') !== 0 && typeof location !== 'undefined') {
+            var base = location.origin + location.pathname.replace(/\/[^/]*$/, '/');
+            excelUrl = base + (excelUrl.indexOf('/') === 0 ? excelUrl.slice(1) : excelUrl);
+          }
+          loading.textContent = 'Loading Excel from link...';
+          loading.classList.remove('hidden');
+          errorBox.classList.add('hidden');
+          loadExcelFromUrl(excelUrl).then(function (data) {
+            var result = normalizeRows(data);
+            if (result.error) {
+              errorBox.textContent = '⚠️ ' + result.error;
+              errorBox.classList.remove('hidden');
+              return;
+            }
+            rows = result.rows;
+            fileName = 'Excel from link';
+            uploadArea.classList.add('hidden');
+            chartSection.classList.remove('hidden');
+            renderStats();
+            renderNav();
+            renderChart();
+          }).catch(function (err) {
+            errorBox.textContent = '⚠️ Could not load Excel from link. ' + (err.message || err) + ' Try opening the link in a new tab or use the full URL with ?excel= at the end.';
+            errorBox.classList.remove('hidden');
+          }).finally(function () {
+            loading.classList.add('hidden');
+            loading.textContent = 'Loading...';
+          });
+        }
       }
     })();
   </script>
